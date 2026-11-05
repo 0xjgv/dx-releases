@@ -7,6 +7,9 @@
 # DX_INSTALL_DIR    target directory (default: $HOME/.local/bin)
 # DX_DOWNLOAD_BASE  releases base: URL or local directory laid out like
 #                   GitHub's latest/download/<asset> and download/<tag>/<asset>
+#
+# A first install also creates ~/.dx/config.toml and ~/.dx/workflows from the
+# release presets. Existing files, directories, and symlinks are never touched.
 set -eu
 
 REPO=0xjgv/dx-releases
@@ -29,6 +32,21 @@ fetch() {
 		fi
 		;;
 	esac || die "download failed: $1"
+}
+
+# fetch_verified downloads $1 from the release into $tmpdir and checks it
+# against checksums.txt.
+fetch_verified() {
+	expected=$(awk -v f="$1" '{sub(/^\*/, "", $2)} $2 == f {print $1}' "$tmpdir/checksums.txt")
+	fetch "$release/$1" "$tmpdir/$1"
+	actual=$(sha256 "$tmpdir/$1")
+	[ "$actual" = "$expected" ] ||
+		die "checksum mismatch for $1: expected $expected, got $actual"
+}
+
+# missing reports whether nothing (not even a dangling symlink) is at $1.
+missing() {
+	[ ! -e "$1" ] && [ ! -L "$1" ]
 }
 
 sha256() {
@@ -79,12 +97,7 @@ fetch "$release/checksums.txt" "$tmpdir/checksums.txt"
 archive=$(awk '{sub(/^\*/, "", $2); print $2}' "$tmpdir/checksums.txt" |
 	grep "^dx_.*_${os}_${arch}\.tar\.gz\$" | head -n 1 || true)
 [ -n "$archive" ] || die "no $os/$arch archive in $release/checksums.txt"
-expected=$(awk -v f="$archive" '{sub(/^\*/, "", $2)} $2 == f {print $1}' "$tmpdir/checksums.txt")
-
-fetch "$release/$archive" "$tmpdir/$archive"
-actual=$(sha256 "$tmpdir/$archive")
-[ "$actual" = "$expected" ] ||
-	die "checksum mismatch for $archive: expected $expected, got $actual"
+fetch_verified "$archive"
 
 tar -xzf "$tmpdir/$archive" -C "$tmpdir" dx || die "cannot extract dx from $archive"
 
@@ -105,6 +118,23 @@ if [ -n "$previous" ] && [ "$previous" != "$current" ]; then
 	echo "Updated $target: $previous -> $current"
 else
 	echo "Installed $target: $current"
+fi
+
+dx_home=$HOME/.dx
+presets=$(awk '{sub(/^\*/, "", $2); print $2}' "$tmpdir/checksums.txt" |
+	grep '^dx_presets_.*\.tar\.gz$' | head -n 1 || true)
+if [ -n "$presets" ] && { missing "$dx_home/config.toml" || missing "$dx_home/workflows"; }; then
+	fetch_verified "$presets"
+	mkdir -p "$tmpdir/presets" "$dx_home"
+	tar -xzf "$tmpdir/$presets" -C "$tmpdir/presets" || die "cannot extract $presets"
+	if missing "$dx_home/config.toml"; then
+		cp "$tmpdir/presets/config.example.toml" "$dx_home/config.toml"
+		echo "Created $dx_home/config.toml"
+	fi
+	if missing "$dx_home/workflows"; then
+		cp -R "$tmpdir/presets/workflows" "$dx_home/workflows"
+		echo "Created $dx_home/workflows"
+	fi
 fi
 
 case :$PATH: in
